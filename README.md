@@ -1,2 +1,2 @@
-# DepEdBAC-TS-v25
-Mode of Procurement dropdown (Sorting for the dashboard)
+# DepEdBAC-TS-v20
+Added PR Number duplication SQL error + in app error trapping for double auth 
