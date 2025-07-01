@@ -3,7 +3,7 @@
 if (session_status() == PHP_SESSION_NONE) {
     session_start();
 }
-require 'config.php'; // Ensure this file properly connects to your database using PDO
+require 'config.php';
 require_once 'url_helper.php';
 
 // Check that the user is logged in.
@@ -17,22 +17,9 @@ if ($projectID <= 0) {
     die("Invalid Project ID");
 }
 
-// Define the ordered list of stages. This should be consistent across index.php and edit_project.php
-$stagesOrder = [
-    'Purchase Request',
-    'RFQ 1',
-    'RFQ 2',
-    'RFQ 3',
-    'Abstract of Quotation',
-    'Purchase Order',
-    'Notice of Award',
-    'Notice to Proceed'
-];
-
-// Permission Variables - define early for consistent use
+// Permission Variables
 $isAdmin = ($_SESSION['admin'] == 1);
-$isProjectCreator = false; // Initialize, will be set after fetching project details
-
+$isProjectCreator = false;
 
 // --- Define the Office List (fetched dynamically) ---
 $officeList = [];
@@ -60,10 +47,8 @@ if (isset($_SESSION['userID'])) {
         }
     } catch (PDOException $e) {
         error_log("Error fetching logged-in user office details: " . $e->getMessage());
-        // Gracefully handle if user's office cannot be fetched
     }
 }
-
 
 // --- Function to fetch project details ---
 function fetchProjectDetails($pdo, $projectID) {
@@ -73,11 +58,11 @@ function fetchProjectDetails($pdo, $projectID) {
             u.firstname AS creator_firstname,
             u.lastname AS creator_lastname,
             o.officename,
-            mop.MoPDescription  -- Add this line to select MoPDescription
+            mop.MoPDescription
         FROM tblproject p
         LEFT JOIN tbluser u ON p.userID = u.userID
         LEFT JOIN officeid o ON u.officeID = o.officeID
-        LEFT JOIN mode_of_procurement mop ON p.MoPID = mop.MoPID -- Add this line for the JOIN
+        LEFT JOIN mode_of_procurement mop ON p.MoPID = mop.MoPID
         WHERE p.projectID = ?
     ";
     $stmt = $pdo->prepare($sql);
@@ -85,23 +70,20 @@ function fetchProjectDetails($pdo, $projectID) {
     return $stmt->fetch();
 }
 
-// --- Function to fetch project stages ---
-function fetchProjectStages($pdo, $projectID, $stagesOrder) {
-    // This query now expects officeID to be present in tblproject_stages
-    $stmt2 = $pdo->prepare("SELECT * FROM tblproject_stages
-                             WHERE projectID = ?
-                             ORDER BY FIELD(stageName, 'Purchase Request','RFQ 1','RFQ 2','RFQ 3','Abstract of Quotation','Purchase Order','Notice of Award','Notice to Proceed')");
+// --- Function to fetch project stages (ordered by stageID) ---
+function fetchProjectStages($pdo, $projectID) {
+    $stmt2 = $pdo->prepare("SELECT * FROM tblproject_stages WHERE projectID = ? ORDER BY stageID ASC");
     $stmt2->execute([$projectID]);
     $stages = $stmt2->fetchAll(PDO::FETCH_ASSOC);
 
-    // If no stages exist, create records for every stage.
+    // If no stages exist, create default stages (should not happen if project creation is correct)
     if (empty($stages)) {
-        foreach ($stagesOrder as $stageName) {
-            $insertCreatedAt = null;
-            if ($stageName === 'Purchase Request') {
-                $insertCreatedAt = date("Y-m-d H:i:s");
-            }
-            // Initialize officeID as NULL when creating new stages
+        // Fetch default stages from stage_reference table
+        $stmtRef = $pdo->query("SELECT stageName FROM stage_reference ORDER BY stageOrder ASC");
+        $defaultStages = $stmtRef->fetchAll(PDO::FETCH_COLUMN);
+
+        foreach ($defaultStages as $stageName) {
+            $insertCreatedAt = ($stageName === 'Purchase Request') ? date("Y-m-d H:i:s") : null;
             $stmtInsert = $pdo->prepare("INSERT INTO tblproject_stages (projectID, stageName, officeID, createdAt) VALUES (?, ?, ?, ?)");
             $stmtInsert->execute([$projectID, $stageName, null, $insertCreatedAt]);
         }
@@ -119,27 +101,37 @@ if (!$project) {
 }
 $isProjectCreator = ($project['userID'] == $_SESSION['userID']);
 
-$stages = fetchProjectStages($pdo, $projectID, $stagesOrder);
+// Fetch stage order from reference table
+$stmtStageRef = $pdo->query("SELECT stageName FROM stage_reference ORDER BY stageOrder ASC");
+$stagesOrder = $stmtStageRef->fetchAll(PDO::FETCH_COLUMN);
+
+// Fetch all stages for this project, ordered by stageID
+$stages = fetchProjectStages($pdo, $projectID);
 
 // Map stages by stageName for easy access and find the last submitted stage.
 $stagesMap = [];
 $noticeToProceedSubmitted = false;
 $lastSubmittedStageIndex = -1;
 
-foreach ($stages as $index => $s) {
-    $stagesMap[$s['stageName']] = $s;
-    if ($s['isSubmitted'] == 1) {
-        $stageIndexInOrder = array_search($s['stageName'], $stagesOrder);
-        if ($stageIndexInOrder !== false && $stageIndexInOrder > $lastSubmittedStageIndex) {
-            $lastSubmittedStageIndex = $stageIndexInOrder;
+foreach ($stagesOrder as $index => $stageName) {
+    $s = null;
+    foreach ($stages as $stage) {
+        if ($stage['stageName'] === $stageName) {
+            $s = $stage;
+            break;
         }
     }
-    if ($s['stageName'] === 'Notice to Proceed' && $s['isSubmitted'] == 1) {
-        $noticeToProceedSubmitted = true;
+    if ($s) {
+        $stagesMap[$stageName] = $s;
+        if ($s['isSubmitted'] == 1) {
+            $lastSubmittedStageIndex = $index;
+        }
+        if ($stageName === 'Notice to Proceed' && $s['isSubmitted'] == 1) {
+            $noticeToProceedSubmitted = true;
+        }
     }
 }
 $lastSubmittedStageName = ($lastSubmittedStageIndex !== -1) ? $stagesOrder[$lastSubmittedStageIndex] : null;
-
 
 // Process Project Header update (available ONLY for admins).
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_project_header'])) {
@@ -156,7 +148,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_project_header
 
             $successHeader = "Project details updated successfully.";
             $project = fetchProjectDetails($pdo, $projectID);
-            $stages = fetchProjectStages($pdo, $projectID, $stagesOrder);
+            $stages = fetchProjectStages($pdo, $projectID);
+            $stagesOrder = array_column($stages, 'stageName');
         }
     } else {
         $errorHeader = "You do not have permission to update project details.";
@@ -178,32 +171,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_stage'])) {
     // Determine if this is a "Submit" or "Unsubmit" action
     $isSubmittedVal = 1; // Default to submit
     if ($isAdmin && $currentIsSubmittedInDB && $stageName === $lastSubmittedStageName) {
-        // If admin is unsubmitting, and it's the last submitted stage, set isSubmitted to 0
         $isSubmittedVal = 0;
     }
 
     // --- Validation Logic ---
     $validationFailed = false;
     if ($isSubmittedVal == 1) { // Only validate on "Submit" action
-        // 'Approved' and 'Remark' are always required for submission
         if (empty($approvedAt)) {
             $validationFailed = true;
         }
-        // 'Created' is required for admin submission (except PR)
         if ($isAdmin && $stageName !== 'Purchase Request' && empty($formCreated)) {
             $validationFailed = true;
         }
-        // No validation needed for 'Office' as it's automatically filled by user's officeID on backend
     }
 
     if ($validationFailed) {
         $stageError = "All required fields (Approved and Remark" . ($isAdmin && $stageName !== 'Purchase Request' ? ", Created" : "") . ") must be filled for stage '$stageName' to be submitted.";
     } else {
-        // Determine the office ID to save: it's the logged-in user's office ID for submission
-        // This is the core change: It will always use the submitting user's office ID.
         $officeIDToSave = $loggedInUserOfficeID;
-
-        // Prepare createdAt for update:
         $currentCreatedAtInDB = $currentStageDataForPost['createdAt'] ?? null;
         $actualCreatedAt = $currentCreatedAtInDB;
 
@@ -219,19 +204,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_stage'])) {
             }
         }
 
-        // Convert datetime-local values ("Y-m-d\TH:i") to MySQL datetime ("Y-m-d H:i:s").
         $created_dt = $actualCreatedAt ? date("Y-m-d H:i:s", strtotime($actualCreatedAt)) : null;
 
-        // If unsubmitting, clear approvedAt, officeID, and remarks
         if ($isSubmittedVal == 0) {
             $approved_dt = null;
-            $officeIDToSave = null; // Set officeID to null on unsubmit
+            $officeIDToSave = null;
             $remark = "";
         } else {
             $approved_dt = $approvedAt ? date("Y-m-d H:i:s", strtotime($approvedAt)) : null;
         }
 
-        // Updated SQL to use officeID
         $stmtStageUpdate = $pdo->prepare("UPDATE tblproject_stages
                                                SET createdAt = ?, approvedAt = ?, officeID = ?, remarks = ?, isSubmitted = ?
                                                WHERE projectID = ? AND stageName = ?");
@@ -257,7 +239,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_stage'])) {
 
         // Re-fetch ALL data immediately after stage update/submission
         $project = fetchProjectDetails($pdo, $projectID);
-        $stages = fetchProjectStages($pdo, $projectID, $stagesOrder);
+        $stages = fetchProjectStages($pdo, $projectID);
+        $stagesOrder = array_column($stages, 'stageName');
 
         // Re-map stages after re-fetching to ensure latest status is used for rendering
         $stagesMap = [];
@@ -291,7 +274,6 @@ if (!empty($project['editedBy'])) {
 }
 
 // --- Determine the "Next Unsubmitted Stage" for strict sequential access ---
-// This is used throughout the page for determining which stage can be submitted
 $firstUnsubmittedStageName = null;
 foreach ($stagesOrder as $stage) {
     if (isset($stagesMap[$stage]) && $stagesMap[$stage]['isSubmitted'] == 0) {
@@ -299,5 +281,6 @@ foreach ($stagesOrder as $stage) {
         break;
     }
 }
+
 include 'view/edit_project_content.php';
 ?>

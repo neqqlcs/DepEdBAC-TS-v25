@@ -14,19 +14,9 @@ if (!isset($_SESSION['username'])) {
     redirect('login.php');
 }
 
-// Define the ordered list of stages for display and processing
-// This is crucial for the SQL query to determine the 'first_unsubmitted_stage' correctly
-$stagesOrder = [
-    'Purchase Request',
-    'RFQ 1',
-    'RFQ 2',
-    'RFQ 3',
-    'Abstract of Quotation',
-    'Purchase Order',
-    'Notice of Award',
-    'Notice to Proceed'
-];
-
+// Fetch stage order from reference table
+$stmtStageRef = $pdo->query("SELECT stageName FROM stage_reference ORDER BY stageOrder ASC");
+$stagesOrder = $stmtStageRef->fetchAll(PDO::FETCH_COLUMN);
 
 $filterStatus = $_GET['status'] ?? ''; // Get the 'status' parameter from the URL
 
